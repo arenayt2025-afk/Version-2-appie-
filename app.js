@@ -10,7 +10,6 @@ const firebaseConfig = {
   measurementId: "G-9G8M5W4WZ8"
 };
 
-
 firebase.initializeApp(firebaseConfig);
 const db = firebase.database();
 
@@ -52,76 +51,70 @@ async function initMedia() {
 
 window.onload = initMedia;
 
-// 🔥 CLEAN ROOM
+// 🔥 CLEAN
 async function cleanRoom() {
-  if (!roomId) return;
-
-  console.log("Cleaning:", roomId);
-
   try {
-    await db.ref("rooms/" + roomId).remove();
-    await db.ref("calls/" + roomId).remove();
+    if (roomId) {
+      await db.ref("rooms/" + roomId).remove();
+      await db.ref("calls/" + roomId).remove();
+    }
+
+    await db.ref("waiting/" + userId).remove();
+
   } catch (e) {
     console.log(e);
   }
 }
 
-// 🔎 FIND MATCH (SMART QUEUE)
+// 🔥 FIND MATCH (QUEUE SYSTEM)
 async function findMatch() {
   setStatus("Searching...");
 
-  const roomsRef = db.ref("rooms");
-  const snapshot = await roomsRef.once("value");
+  const waitingRef = db.ref("waiting");
 
-  let joined = false;
+  const snap = await waitingRef.once("value");
 
-  if (snapshot.exists()) {
-    snapshot.forEach((room) => {
-      const users = room.val().users || {};
+  // 👉 if someone waiting → connect
+  if (snap.exists()) {
+    const users = snap.val();
+    const otherUserId = Object.keys(users)[0];
 
-      if (Object.keys(users).length === 1 && !joined) {
-        roomId = room.key;
+    if (otherUserId !== userId) {
+      console.log("Matched with:", otherUserId);
 
-        console.log("Joining:", roomId);
+      await waitingRef.child(otherUserId).remove();
 
-        roomsRef.child(roomId + "/users/" + userId).set(true);
+      roomId = "room_" + Date.now();
 
-        // mark connected
-        db.ref("rooms/" + roomId).update({
-          wasConnected: true
-        });
+      await db.ref("rooms/" + roomId).set({
+        users: {
+          [userId]: true,
+          [otherUserId]: true
+        }
+      });
 
-        startCall(true);
-        joined = true;
-      }
-    });
+      startCall(true);
+      return;
+    }
   }
 
-  if (!joined) {
-    roomId = "room_" + Date.now();
+  // 👉 no one → wait
+  console.log("Waiting for user...");
 
-    console.log("Creating:", roomId);
+  await waitingRef.child(userId).set(true);
 
-    await roomsRef.child(roomId).set({
-      users: { [userId]: true },
-      wasConnected: false
-    });
+  // listen for room
+  db.ref("rooms").on("child_added", (snap) => {
+    const room = snap.val();
 
-    // wait for second user
-    roomsRef.child(roomId + "/users").on("value", (snap) => {
-      const users = snap.val();
+    if (room.users && room.users[userId]) {
+      roomId = snap.key;
 
-      if (users && Object.keys(users).length === 2) {
-        console.log("User joined");
+      console.log("Joined room:", roomId);
 
-        db.ref("rooms/" + roomId).update({
-          wasConnected: true
-        });
-
-        startCall(false);
-      }
-    });
-  }
+      startCall(false);
+    }
+  });
 }
 
 // 🚀 START CALL
@@ -206,21 +199,6 @@ async function startCall(isCaller) {
     });
   }
 
-  // 🔥 DISCONNECT CLEAN
-  db.ref("rooms/" + roomId + "/users").on("value", (snap) => {
-    const users = snap.val();
-
-    if (!users || Object.keys(users).length < 2) {
-      if (pc) pc.close();
-
-      setStatus("Disconnected");
-
-      document.getElementById("remoteVideo").srcObject = null;
-
-      cleanRoom();
-    }
-  });
-
   pc.onconnectionstatechange = () => {
     if (pc.connectionState === "connected") {
       setStatus("Connected 🎉");
@@ -228,42 +206,30 @@ async function startCall(isCaller) {
   };
 }
 
-// NEXT
+// 🔁 NEXT
 async function nextUser() {
   if (pc) pc.close();
 
   await cleanRoom();
 
-  location.reload();
+  callStarted = false;
+  isRemoteDescSet = false;
+  pendingCandidates = [];
+
+  setStatus("Searching...");
+
+  findMatch();
 }
 
 // BUTTONS
 document.getElementById("findBtn").onclick = findMatch;
 document.getElementById("nextBtn").onclick = nextUser;
 
-// REFRESH CLEAN
+// 🔥 REFRESH CLEAN
 window.onbeforeunload = () => {
   if (roomId) {
     db.ref("rooms/" + roomId).remove();
     db.ref("calls/" + roomId).remove();
   }
+  db.ref("waiting/" + userId).remove();
 };
-
-// 🔥 SMART AUTO CLEAN (FIXED)
-setInterval(async () => {
-  const snap = await db.ref("rooms").once("value");
-
-  snap.forEach(async (room) => {
-    const data = room.val();
-    const users = data.users || {};
-    const count = Object.keys(users).length;
-
-    // 🔥 only delete broken rooms
-    if (count === 1 && data.wasConnected === true) {
-      console.log("Cleaning broken room:", room.key);
-
-      await db.ref("rooms/" + room.key).remove();
-      await db.ref("calls/" + room.key).remove();
-    }
-  });
-}, 10000);
