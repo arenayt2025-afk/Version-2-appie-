@@ -13,206 +13,140 @@ const firebaseConfig = {
 firebase.initializeApp(firebaseConfig);
 const db = firebase.database();
 
-let localStream = null;
-let pc = null;
-let roomId = null;
+let localStream;
+let pc;
+let roomId;
+let role;
 let userId = Math.random().toString(36).substr(2, 9);
-
-// FIXES
-let pendingCandidates = [];
-let isRemoteDescSet = false;
-let callStarted = false;
 
 const servers = {
   iceServers: [{ urls: "stun:stun.l.google.com:19302" }]
 };
 
-function setStatus(text) {
-  document.getElementById("status").innerText = "Status: " + text;
-  console.log(text);
+function setStatus(s) {
+  document.getElementById("status").innerText = s;
+  console.log(s);
 }
 
-// 🎥 CAMERA INIT
-async function initMedia() {
-  try {
-    localStream = await navigator.mediaDevices.getUserMedia({
-      video: true,
-      audio: true
-    });
+// CAMERA
+async function init() {
+  localStream = await navigator.mediaDevices.getUserMedia({
+    video: true,
+    audio: true
+  });
+  document.getElementById("localVideo").srcObject = localStream;
+}
+init();
 
-    document.getElementById("localVideo").srcObject = localStream;
-
-  } catch (e) {
-    alert("Camera error");
+// CLEAN
+async function cleanAll() {
+  if (roomId) {
+    await db.ref("rooms/" + roomId).remove();
+    await db.ref("calls/" + roomId).remove();
   }
-}
-window.onload = initMedia;
-
-// 🔥 FORCE DISCONNECT
-function forceDisconnect() {
-  console.log("🔥 Force Disconnect");
-
-  if (pc) {
-    pc.ontrack = null;
-    pc.onicecandidate = null;
-    pc.close();
-    pc = null;
-  }
-
-  document.getElementById("remoteVideo").srcObject = null;
-
-  callStarted = false;
-  isRemoteDescSet = false;
-  pendingCandidates = [];
-
-  setStatus("Disconnected");
+  await db.ref("waiting/" + userId).remove();
 }
 
-// 🔥 CLEAN
-async function cleanRoom() {
-  try {
-    if (roomId) {
-      await db.ref("rooms/" + roomId).remove();
-      await db.ref("calls/" + roomId).remove();
-    }
-    await db.ref("waiting/" + userId).remove();
-  } catch (e) {
-    console.log(e);
-  }
-}
-
-// 🔥 FIND MATCH (QUEUE SYSTEM)
+// FIND MATCH
 async function findMatch() {
   setStatus("Searching...");
 
-  const waitingRef = db.ref("waiting");
-  const snap = await waitingRef.once("value");
+  const waiting = await db.ref("waiting").once("value");
 
-  if (snap.exists()) {
-    const users = snap.val();
-    const otherUserId = Object.keys(users)[0];
+  if (waiting.exists()) {
+    const other = Object.keys(waiting.val())[0];
 
-    if (otherUserId !== userId) {
-      await waitingRef.child(otherUserId).remove();
+    if (other !== userId) {
+      await db.ref("waiting/" + other).remove();
 
       roomId = "room_" + Date.now();
+      role = "caller";
 
       await db.ref("rooms/" + roomId).set({
-        users: {
-          [userId]: true,
-          [otherUserId]: true
-        }
+        caller: userId,
+        callee: other
       });
 
-      startCall(true);
+      startCall();
       return;
     }
   }
 
-  await waitingRef.child(userId).set(true);
+  // wait
+  await db.ref("waiting/" + userId).set(true);
 
   db.ref("rooms").on("child_added", (snap) => {
     const room = snap.val();
 
-    if (room.users && room.users[userId]) {
+    if (room.callee === userId) {
       roomId = snap.key;
-      startCall(false);
+      role = "callee";
+      startCall();
     }
   });
 }
 
-// 🚀 START CALL
-async function startCall(isCaller) {
-
-  if (callStarted) return;
-  callStarted = true;
-
+// START CALL
+async function startCall() {
   setStatus("Connecting...");
-
-  // 🔥 CLEAR OLD SIGNALING
-  await db.ref("calls/" + roomId).remove();
 
   pc = new RTCPeerConnection(servers);
 
-  localStream.getTracks().forEach(track => {
-    pc.addTrack(track, localStream);
-  });
+  localStream.getTracks().forEach(t => pc.addTrack(t, localStream));
 
-  // 🎥 REMOTE VIDEO FIX
-  pc.ontrack = (event) => {
-    console.log("Remote stream received");
-    document.getElementById("remoteVideo").srcObject = event.streams[0];
+  pc.ontrack = (e) => {
+    document.getElementById("remoteVideo").srcObject = e.streams[0];
   };
 
-  const roomRef = db.ref("calls/" + roomId);
+  const callRef = db.ref("calls/" + roomId);
 
-  // ICE SEND
-  pc.onicecandidate = (event) => {
-    if (event.candidate) {
-      roomRef.child("candidates").push(JSON.stringify(event.candidate));
+  // ICE
+  pc.onicecandidate = (e) => {
+    if (e.candidate) {
+      callRef.child(role + "_candidates").push(JSON.stringify(e.candidate));
     }
   };
 
-  // ICE RECEIVE
-  roomRef.child("candidates").on("child_added", async (snap) => {
-    const candidate = new RTCIceCandidate(JSON.parse(snap.val()));
+  const otherRole = role === "caller" ? "callee" : "caller";
 
-    if (isRemoteDescSet) {
-      await pc.addIceCandidate(candidate);
-    } else {
-      pendingCandidates.push(candidate);
-    }
+  callRef.child(otherRole + "_candidates").on("child_added", async (snap) => {
+    const c = new RTCIceCandidate(JSON.parse(snap.val()));
+    try {
+      await pc.addIceCandidate(c);
+    } catch {}
   });
 
-  // 🔥 DISCONNECT LISTENER
-  db.ref("rooms/" + roomId + "/disconnect").on("value", (snap) => {
-    if (snap.exists()) {
-      forceDisconnect();
-    }
-  });
-
-  if (isCaller) {
+  if (role === "caller") {
     const offer = await pc.createOffer();
     await pc.setLocalDescription(offer);
 
-    await roomRef.child("offer").set(JSON.stringify(offer));
+    await callRef.child("offer").set(JSON.stringify(offer));
 
-    roomRef.child("answer").on("value", async (snap) => {
+    callRef.child("answer").on("value", async (snap) => {
       if (snap.exists()) {
-        const answer = JSON.parse(snap.val());
-
-        await pc.setRemoteDescription(answer);
-
-        isRemoteDescSet = true;
-
-        for (let c of pendingCandidates) {
-          await pc.addIceCandidate(c);
-        }
-        pendingCandidates = [];
+        await pc.setRemoteDescription(JSON.parse(snap.val()));
       }
     });
 
   } else {
-    roomRef.child("offer").on("value", async (snap) => {
-      if (snap.exists()) {
-        const offer = JSON.parse(snap.val());
+    callRef.child("offer").on("value", async (snap) => {
+      if (!snap.exists()) return;
 
-        await pc.setRemoteDescription(offer);
+      await pc.setRemoteDescription(JSON.parse(snap.val()));
 
-        isRemoteDescSet = true;
+      const answer = await pc.createAnswer();
+      await pc.setLocalDescription(answer);
 
-        for (let c of pendingCandidates) {
-          await pc.addIceCandidate(c);
-        }
-        pendingCandidates = [];
-
-        const answer = await pc.createAnswer();
-        await pc.setLocalDescription(answer);
-
-        await roomRef.child("answer").set(JSON.stringify(answer));
-      }
+      await callRef.child("answer").set(JSON.stringify(answer));
     });
   }
+
+  // DISCONNECT
+  db.ref("rooms/" + roomId).on("value", (snap) => {
+    if (!snap.exists()) {
+      disconnect();
+    }
+  });
 
   pc.onconnectionstatechange = () => {
     if (pc.connectionState === "connected") {
@@ -221,18 +155,21 @@ async function startCall(isCaller) {
   };
 }
 
-// 🔁 NEXT
-async function nextUser() {
-
-  if (roomId) {
-    await db.ref("rooms/" + roomId + "/disconnect").set(true);
+// DISCONNECT
+function disconnect() {
+  if (pc) {
+    pc.close();
+    pc = null;
   }
 
-  forceDisconnect();
+  document.getElementById("remoteVideo").srcObject = null;
+  setStatus("Disconnected");
+}
 
-  await cleanRoom();
-
-  setStatus("Searching...");
+// NEXT
+async function nextUser() {
+  await cleanAll();
+  disconnect();
   findMatch();
 }
 
@@ -240,7 +177,7 @@ async function nextUser() {
 document.getElementById("findBtn").onclick = findMatch;
 document.getElementById("nextBtn").onclick = nextUser;
 
-// 🔥 REFRESH CLEAN
+// REFRESH CLEAN
 window.onbeforeunload = () => {
   if (roomId) {
     db.ref("rooms/" + roomId).remove();
