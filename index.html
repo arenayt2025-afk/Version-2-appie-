@@ -1,17 +1,17 @@
 <!DOCTYPE html>
 <html>
 <head>
-  <title>Omegle Stable</title>
+  <title>Appie</title>
 </head>
 <body>
 
-<button id="findBtn">Find</button>
-<button id="nextBtn">Next</button>
+<button onclick="find()">Find</button>
+<button onclick="next()">Next</button>
 
 <p id="status">Idle</p>
 
-<video id="localVideo" autoplay muted playsinline width="200"></video>
-<video id="remoteVideo" autoplay playsinline width="200"></video>
+<video id="local" autoplay muted width="200"></video>
+<video id="remote" autoplay width="200"></video>
 
 <script src="https://www.gstatic.com/firebasejs/8.10.0/firebase-app.js"></script>
 <script src="https://www.gstatic.com/firebasejs/8.10.0/firebase-database.js"></script>
