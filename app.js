@@ -35,20 +35,36 @@ function setStatus(text) {
   console.log(text);
 }
 
-// CAMERA
+// 🎥 CAMERA
 async function initMedia() {
   try {
     localStream = await navigator.mediaDevices.getUserMedia({
       video: true,
       audio: true
     });
+
     document.getElementById("localVideo").srcObject = localStream;
+
   } catch (e) {
     alert("Camera error");
   }
 }
 
 window.onload = initMedia;
+
+// 🔥 CLEAN FUNCTION (MAIN FIX)
+async function cleanRoom() {
+  if (!roomId) return;
+
+  console.log("🔥 Cleaning:", roomId);
+
+  try {
+    await db.ref("rooms/" + roomId).remove();
+    await db.ref("calls/" + roomId).remove();
+  } catch (e) {
+    console.log("Cleanup error:", e);
+  }
+}
 
 // 🔎 FIND MATCH (QUEUE SYSTEM)
 async function findMatch() {
@@ -66,11 +82,11 @@ async function findMatch() {
       if (Object.keys(users).length === 1 && !joined) {
         roomId = room.key;
 
-        console.log("Joining room:", roomId);
+        console.log("Joining:", roomId);
 
         roomsRef.child(roomId + "/users/" + userId).set(true);
 
-        startCall(true); // caller
+        startCall(true);
         joined = true;
       }
     });
@@ -79,7 +95,7 @@ async function findMatch() {
   if (!joined) {
     roomId = "room_" + Date.now();
 
-    console.log("Creating room:", roomId);
+    console.log("Creating:", roomId);
 
     await roomsRef.child(roomId).set({
       users: { [userId]: true }
@@ -89,9 +105,7 @@ async function findMatch() {
       const users = snap.val();
 
       if (users && Object.keys(users).length === 2) {
-        console.log("User joined");
-
-        startCall(false); // receiver
+        startCall(false);
       }
     });
   }
@@ -137,8 +151,6 @@ async function startCall(isCaller) {
   });
 
   if (isCaller) {
-    console.log("Creating OFFER");
-
     const offer = await pc.createOffer();
     await pc.setLocalDescription(offer);
 
@@ -181,12 +193,12 @@ async function startCall(isCaller) {
     });
   }
 
-  // 🔥 ROOM DELETE ON LEAVE
-  db.ref("rooms/" + roomId + "/users").on("value", async (snap) => {
+  // 🔥 DISCONNECT CLEAN
+  db.ref("rooms/" + roomId + "/users").on("value", (snap) => {
     const users = snap.val();
 
     if (!users || Object.keys(users).length < 2) {
-      console.log("User left → delete room");
+      console.log("User left");
 
       if (pc) pc.close();
 
@@ -194,28 +206,22 @@ async function startCall(isCaller) {
 
       document.getElementById("remoteVideo").srcObject = null;
 
-      await db.ref("rooms/" + roomId).remove();
-      await db.ref("calls/" + roomId).remove();
+      cleanRoom(); // 🔥 main fix
     }
   });
 
   pc.onconnectionstatechange = () => {
-    console.log("STATE:", pc.connectionState);
-
     if (pc.connectionState === "connected") {
       setStatus("Connected 🎉");
     }
   };
 }
 
-// NEXT
+// 🔁 NEXT
 async function nextUser() {
   if (pc) pc.close();
 
-  if (roomId) {
-    await db.ref("rooms/" + roomId).remove();
-    await db.ref("calls/" + roomId).remove();
-  }
+  await cleanRoom();
 
   location.reload();
 }
@@ -224,10 +230,24 @@ async function nextUser() {
 document.getElementById("findBtn").onclick = findMatch;
 document.getElementById("nextBtn").onclick = nextUser;
 
-// REFRESH CLEAN
+// 🔥 REFRESH CLEAN (STRONG FIX)
 window.onbeforeunload = () => {
   if (roomId) {
     db.ref("rooms/" + roomId).remove();
     db.ref("calls/" + roomId).remove();
   }
 };
+
+// 🔥 AUTO CLEAN (SAFETY)
+setInterval(async () => {
+  const snap = await db.ref("rooms").once("value");
+
+  snap.forEach(async (room) => {
+    const users = room.val().users || {};
+
+    if (Object.keys(users).length < 2) {
+      await db.ref("rooms/" + room.key).remove();
+      await db.ref("calls/" + room.key).remove();
+    }
+  });
+}, 10000);
