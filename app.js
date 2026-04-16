@@ -10,178 +10,200 @@ const firebaseConfig = {
   measurementId: "G-9G8M5W4WZ8"
 };
 
+
+
 firebase.initializeApp(firebaseConfig);
 const db = firebase.database();
 
 let localStream;
 let pc;
-let roomId;
-let role;
+let roomId = null;
 let userId = Math.random().toString(36).substr(2, 9);
 
+// STUN
 const servers = {
   iceServers: [{ urls: "stun:stun.l.google.com:19302" }]
 };
 
 function setStatus(s) {
   document.getElementById("status").innerText = s;
-  console.log(s);
 }
 
-// CAMERA
+// 🎥 CAMERA
 async function init() {
   localStream = await navigator.mediaDevices.getUserMedia({
     video: true,
     audio: true
   });
-  document.getElementById("localVideo").srcObject = localStream;
+  document.getElementById("local").srcObject = localStream;
 }
 init();
 
-// CLEAN
-async function cleanAll() {
-  if (roomId) {
-    await db.ref("rooms/" + roomId).remove();
-    await db.ref("calls/" + roomId).remove();
-  }
-  await db.ref("waiting/" + userId).remove();
-}
 
-// FIND MATCH
-async function findMatch() {
+// 🔥 FIND LOGIC (ROOM BASED)
+async function find() {
   setStatus("Searching...");
 
-  const waiting = await db.ref("waiting").once("value");
+  const roomsRef = db.ref("rooms");
+  const snap = await roomsRef.once("value");
 
-  if (waiting.exists()) {
-    const other = Object.keys(waiting.val())[0];
+  let found = false;
 
-    if (other !== userId) {
-      await db.ref("waiting/" + other).remove();
+  if (snap.exists()) {
+    snap.forEach(room => {
+      const users = room.val().users || {};
 
-      roomId = "room_" + Date.now();
-      role = "caller";
+      if (Object.keys(users).length === 1 && !found) {
+        // 🔥 join existing room
+        roomId = room.key;
 
-      await db.ref("rooms/" + roomId).set({
-        caller: userId,
-        callee: other
-      });
+        roomsRef.child(roomId + "/users/" + userId).set(true);
 
-      startCall();
-      return;
-    }
+        found = true;
+
+        startCall();
+      }
+    });
   }
 
-  // wait
-  await db.ref("waiting/" + userId).set(true);
+  if (!found) {
+    // 🔥 create new room
+    roomId = "room_" + Date.now();
 
-  db.ref("rooms").on("child_added", (snap) => {
-    const room = snap.val();
+    await roomsRef.child(roomId).set({
+      users: {
+        [userId]: true
+      }
+    });
 
-    if (room.callee === userId) {
-      roomId = snap.key;
-      role = "callee";
-      startCall();
-    }
-  });
+    // wait for second user
+    roomsRef.child(roomId + "/users").on("value", snap => {
+      const users = snap.val();
+
+      if (users && Object.keys(users).length === 2) {
+        startCall();
+      }
+    });
+  }
 }
 
-// START CALL
+
+// 🚀 START CALL
 async function startCall() {
   setStatus("Connecting...");
 
   pc = new RTCPeerConnection(servers);
 
-  localStream.getTracks().forEach(t => pc.addTrack(t, localStream));
+  localStream.getTracks().forEach(track => {
+    pc.addTrack(track, localStream);
+  });
 
-  pc.ontrack = (e) => {
-    document.getElementById("remoteVideo").srcObject = e.streams[0];
+  pc.ontrack = e => {
+    document.getElementById("remote").srcObject = e.streams[0];
   };
 
   const callRef = db.ref("calls/" + roomId);
 
   // ICE
-  pc.onicecandidate = (e) => {
+  pc.onicecandidate = e => {
     if (e.candidate) {
-      callRef.child(role + "_candidates").push(JSON.stringify(e.candidate));
+      callRef.push(JSON.stringify(e.candidate));
     }
   };
 
-  const otherRole = role === "caller" ? "callee" : "caller";
-
-  callRef.child(otherRole + "_candidates").on("child_added", async (snap) => {
-    const c = new RTCIceCandidate(JSON.parse(snap.val()));
+  callRef.on("child_added", async snap => {
     try {
-      await pc.addIceCandidate(c);
+      await pc.addIceCandidate(new RTCIceCandidate(JSON.parse(snap.val())));
     } catch {}
   });
 
-  if (role === "caller") {
+  // OFFER / ANSWER
+  const offerRef = db.ref("calls/" + roomId + "/offer");
+
+  const offerSnap = await offerRef.once("value");
+
+  if (!offerSnap.exists()) {
+    // caller
     const offer = await pc.createOffer();
     await pc.setLocalDescription(offer);
 
-    await callRef.child("offer").set(JSON.stringify(offer));
+    await offerRef.set(JSON.stringify(offer));
 
-    callRef.child("answer").on("value", async (snap) => {
+    db.ref("calls/" + roomId + "/answer").on("value", async snap => {
       if (snap.exists()) {
         await pc.setRemoteDescription(JSON.parse(snap.val()));
       }
     });
 
   } else {
-    callRef.child("offer").on("value", async (snap) => {
-      if (!snap.exists()) return;
+    // callee
+    await pc.setRemoteDescription(JSON.parse(offerSnap.val()));
 
-      await pc.setRemoteDescription(JSON.parse(snap.val()));
+    const answer = await pc.createAnswer();
+    await pc.setLocalDescription(answer);
 
-      const answer = await pc.createAnswer();
-      await pc.setLocalDescription(answer);
-
-      await callRef.child("answer").set(JSON.stringify(answer));
-    });
+    await db.ref("calls/" + roomId + "/answer").set(JSON.stringify(answer));
   }
 
-  // DISCONNECT
-  db.ref("rooms/" + roomId).on("value", (snap) => {
-    if (!snap.exists()) {
+  // 🔥 DISCONNECT LISTENER
+  db.ref("rooms/" + roomId + "/users").on("value", snap => {
+    const users = snap.val();
+
+    if (!users || Object.keys(users).length < 2) {
       disconnect();
+
+      setStatus("Searching...");
     }
   });
-
-  pc.onconnectionstatechange = () => {
-    if (pc.connectionState === "connected") {
-      setStatus("Connected 🎉");
-    }
-  };
 }
 
-// DISCONNECT
+
+// 🔥 NEXT LOGIC (IMPORTANT)
+async function next() {
+
+  if (!roomId) return;
+
+  // remove self
+  await db.ref("rooms/" + roomId + "/users/" + userId).remove();
+
+  disconnect();
+
+  // check room
+  const snap = await db.ref("rooms/" + roomId + "/users").once("value");
+
+  if (!snap.exists()) {
+    // no user → delete room
+    await db.ref("rooms/" + roomId).remove();
+    await db.ref("calls/" + roomId).remove();
+  }
+
+  roomId = null;
+
+  find(); // auto search
+}
+
+
+// 🔥 DISCONNECT
 function disconnect() {
   if (pc) {
     pc.close();
     pc = null;
   }
 
-  document.getElementById("remoteVideo").srcObject = null;
-  setStatus("Disconnected");
+  document.getElementById("remote").srcObject = null;
 }
 
-// NEXT
-async function nextUser() {
-  await cleanAll();
-  disconnect();
-  findMatch();
-}
 
-// BUTTONS
-document.getElementById("findBtn").onclick = findMatch;
-document.getElementById("nextBtn").onclick = nextUser;
-
-// REFRESH CLEAN
-window.onbeforeunload = () => {
+// 🔥 REFRESH CLEAN
+window.onbeforeunload = async () => {
   if (roomId) {
-    db.ref("rooms/" + roomId).remove();
-    db.ref("calls/" + roomId).remove();
+    await db.ref("rooms/" + roomId + "/users/" + userId).remove();
+
+    const snap = await db.ref("rooms/" + roomId + "/users").once("value");
+
+    if (!snap.exists()) {
+      await db.ref("rooms/" + roomId).remove();
+      await db.ref("calls/" + roomId).remove();
+    }
   }
-  db.ref("waiting/" + userId).remove();
 };
