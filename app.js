@@ -10,11 +10,18 @@ const firebaseConfig = {
   measurementId: "G-9G8M5W4WZ8"
 };
 
+// 🔥 Firebase config
+const firebaseConfig = {
+  apiKey: "YOUR_KEY",
+  authDomain: "YOUR_DOMAIN",
+  databaseURL: "YOUR_DB_URL",
+  projectId: "YOUR_ID"
+};
+
 firebase.initializeApp(firebaseConfig);
 const db = firebase.database();
 
 let localStream = null;
-let remoteStream = new MediaStream();
 let pc = null;
 let roomId = null;
 let userId = Math.random().toString(36).substr(2, 9);
@@ -24,7 +31,6 @@ let pendingCandidates = [];
 let isRemoteDescSet = false;
 let callStarted = false;
 
-// STUN
 const servers = {
   iceServers: [{ urls: "stun:stun.l.google.com:19302" }]
 };
@@ -34,7 +40,7 @@ function setStatus(text) {
   console.log(text);
 }
 
-// 🎥 CAMERA
+// 🎥 CAMERA INIT
 async function initMedia() {
   try {
     localStream = await navigator.mediaDevices.getUserMedia({
@@ -48,8 +54,27 @@ async function initMedia() {
     alert("Camera error");
   }
 }
-
 window.onload = initMedia;
+
+// 🔥 FORCE DISCONNECT
+function forceDisconnect() {
+  console.log("🔥 Force Disconnect");
+
+  if (pc) {
+    pc.ontrack = null;
+    pc.onicecandidate = null;
+    pc.close();
+    pc = null;
+  }
+
+  document.getElementById("remoteVideo").srcObject = null;
+
+  callStarted = false;
+  isRemoteDescSet = false;
+  pendingCandidates = [];
+
+  setStatus("Disconnected");
+}
 
 // 🔥 CLEAN
 async function cleanRoom() {
@@ -58,9 +83,7 @@ async function cleanRoom() {
       await db.ref("rooms/" + roomId).remove();
       await db.ref("calls/" + roomId).remove();
     }
-
     await db.ref("waiting/" + userId).remove();
-
   } catch (e) {
     console.log(e);
   }
@@ -71,17 +94,13 @@ async function findMatch() {
   setStatus("Searching...");
 
   const waitingRef = db.ref("waiting");
-
   const snap = await waitingRef.once("value");
 
-  // 👉 if someone waiting → connect
   if (snap.exists()) {
     const users = snap.val();
     const otherUserId = Object.keys(users)[0];
 
     if (otherUserId !== userId) {
-      console.log("Matched with:", otherUserId);
-
       await waitingRef.child(otherUserId).remove();
 
       roomId = "room_" + Date.now();
@@ -98,20 +117,13 @@ async function findMatch() {
     }
   }
 
-  // 👉 no one → wait
-  console.log("Waiting for user...");
-
   await waitingRef.child(userId).set(true);
 
-  // listen for room
   db.ref("rooms").on("child_added", (snap) => {
     const room = snap.val();
 
     if (room.users && room.users[userId]) {
       roomId = snap.key;
-
-      console.log("Joined room:", roomId);
-
       startCall(false);
     }
   });
@@ -125,15 +137,19 @@ async function startCall(isCaller) {
 
   setStatus("Connecting...");
 
+  // 🔥 CLEAR OLD SIGNALING
+  await db.ref("calls/" + roomId).remove();
+
   pc = new RTCPeerConnection(servers);
 
   localStream.getTracks().forEach(track => {
     pc.addTrack(track, localStream);
   });
 
+  // 🎥 REMOTE VIDEO FIX
   pc.ontrack = (event) => {
-    remoteStream.addTrack(event.track);
-    document.getElementById("remoteVideo").srcObject = remoteStream;
+    console.log("Remote stream received");
+    document.getElementById("remoteVideo").srcObject = event.streams[0];
   };
 
   const roomRef = db.ref("calls/" + roomId);
@@ -153,6 +169,13 @@ async function startCall(isCaller) {
       await pc.addIceCandidate(candidate);
     } else {
       pendingCandidates.push(candidate);
+    }
+  });
+
+  // 🔥 DISCONNECT LISTENER
+  db.ref("rooms/" + roomId + "/disconnect").on("value", (snap) => {
+    if (snap.exists()) {
+      forceDisconnect();
     }
   });
 
@@ -208,16 +231,16 @@ async function startCall(isCaller) {
 
 // 🔁 NEXT
 async function nextUser() {
-  if (pc) pc.close();
+
+  if (roomId) {
+    await db.ref("rooms/" + roomId + "/disconnect").set(true);
+  }
+
+  forceDisconnect();
 
   await cleanRoom();
 
-  callStarted = false;
-  isRemoteDescSet = false;
-  pendingCandidates = [];
-
   setStatus("Searching...");
-
   findMatch();
 }
 
