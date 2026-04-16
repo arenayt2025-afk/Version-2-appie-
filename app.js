@@ -9,8 +9,13 @@ const firebaseConfig = {
   appId: "1:685763814033:web:f573e17b8125ba1bad5530",
   measurementId: "G-9G8M5W4WZ8"
 };
-
-
+// 🔥 FIREBASE CONFIG
+const firebaseConfig = {
+  apiKey: "YOUR_KEY",
+  authDomain: "YOUR_DOMAIN",
+  databaseURL: "YOUR_DB_URL",
+  projectId: "YOUR_ID"
+};
 
 firebase.initializeApp(firebaseConfig);
 const db = firebase.database();
@@ -29,7 +34,7 @@ function setStatus(s) {
   console.log(s);
 }
 
-// 🎥 CAMERA
+// 🎥 CAMERA INIT
 async function init() {
   try {
     localStream = await navigator.mediaDevices.getUserMedia({
@@ -46,12 +51,12 @@ async function init() {
 init();
 
 
-// 🔥 FIND (RACE SAFE)
+// 🔍 FIND USER
 async function find() {
+
   setStatus("Searching...");
 
   const roomsRef = db.ref("rooms");
-
   let joined = false;
 
   await roomsRef.transaction((rooms) => {
@@ -80,6 +85,10 @@ async function find() {
 
     return rooms;
   });
+
+  // 🔥 AUTO CLEAN (network drop / refresh)
+  db.ref("rooms/" + roomId).onDisconnect().remove();
+  db.ref("calls/" + roomId).onDisconnect().remove();
 
   const snap = await db.ref("rooms/" + roomId + "/users").once("value");
   const count = Object.keys(snap.val()).length;
@@ -179,33 +188,43 @@ async function startCall() {
     }
   };
 
-  // 🔥 ROOM DELETE LISTENER (MAIN FIX)
-  db.ref("rooms/" + roomId).on("value", (snap) => {
+  // 🔥 MAIN CLEANUP (room delete → call delete)
+  db.ref("rooms/" + roomId).on("value", async (snap) => {
     if (!snap.exists()) {
+
+      console.log("Room deleted → cleaning calls");
+
+      await db.ref("calls/" + roomId).remove();
+
       disconnect();
+
       roomId = null;
+
       setStatus("Idle");
     }
   });
 }
 
 
-// 🔁 NEXT (FINAL FIX)
+// 🔁 NEXT
 async function next() {
   if (!roomId) return;
 
-  await db.ref("rooms/" + roomId).remove();
-  await db.ref("calls/" + roomId).remove();
+  const r = roomId;
+  roomId = null;
 
   disconnect();
 
-  roomId = null;
+  await Promise.all([
+    db.ref("rooms/" + r).remove(),
+    db.ref("calls/" + r).remove()
+  ]);
 
-  setStatus("Idle"); // 🔥 NO AUTO SEARCH
+  setStatus("Idle");
 }
 
 
-// 🔥 DISCONNECT
+// ❌ DISCONNECT
 function disconnect() {
   if (pc) {
     pc.close();
@@ -223,5 +242,6 @@ window.onbeforeunload = async () => {
     await db.ref("calls/" + roomId).remove();
   }
 };
+
 
 
