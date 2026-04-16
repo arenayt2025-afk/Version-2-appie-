@@ -11,8 +11,6 @@ const firebaseConfig = {
 };
 
 
-
-
 firebase.initializeApp(firebaseConfig);
 const db = firebase.database();
 
@@ -27,7 +25,6 @@ const servers = {
 
 function setStatus(s) {
   document.getElementById("status").innerText = s;
-  console.log(s);
 }
 
 // 🎥 CAMERA
@@ -36,43 +33,57 @@ async function init() {
     video: true,
     audio: true
   });
-
   document.getElementById("local").srcObject = localStream;
 }
 init();
 
-// 🔥 FIND
+
+// 🔥 FIND (RACE SAFE)
 async function find() {
   setStatus("Searching...");
 
   const roomsRef = db.ref("rooms");
-  const snap = await roomsRef.once("value");
 
   let joined = false;
 
-  if (snap.exists()) {
-    snap.forEach(room => {
-      const users = room.val().users || {};
+  // 🔥 TRANSACTION (LOCK SYSTEM)
+  await roomsRef.transaction((rooms) => {
+    if (!rooms) rooms = {};
 
-      if (Object.keys(users).length === 1 && !joined) {
-        roomId = room.key;
+    for (let id in rooms) {
+      const users = rooms[id].users || {};
 
-        roomsRef.child(roomId + "/users/" + userId).set(true);
-
+      if (Object.keys(users).length === 1) {
+        // join this room
+        rooms[id].users[userId] = true;
+        roomId = id;
         joined = true;
-        startCall();
+        return rooms;
       }
-    });
-  }
+    }
 
-  if (!joined) {
-    roomId = "room_" + Date.now();
+    // no room → create
+    if (!joined) {
+      roomId = "room_" + Date.now();
+      rooms[roomId] = {
+        users: {
+          [userId]: true
+        }
+      };
+    }
 
-    await roomsRef.child(roomId).set({
-      users: { [userId]: true }
-    });
+    return rooms;
+  });
 
-    roomsRef.child(roomId + "/users").on("value", snap => {
+  // 🔥 AFTER TRANSACTION
+  const snap = await db.ref("rooms/" + roomId + "/users").once("value");
+  const count = Object.keys(snap.val()).length;
+
+  if (count === 2) {
+    startCall();
+  } else {
+    // wait for second user
+    db.ref("rooms/" + roomId + "/users").on("value", (snap) => {
       const users = snap.val();
 
       if (users && Object.keys(users).length === 2) {
@@ -82,11 +93,13 @@ async function find() {
   }
 }
 
-// 🚀 START CALL (FIXED)
+
+// 🚀 START CALL
 async function startCall() {
+
   setStatus("Connecting...");
 
-  await db.ref("calls/" + roomId).remove(); // clear old
+  await db.ref("calls/" + roomId).remove();
 
   pc = new RTCPeerConnection(servers);
 
@@ -95,7 +108,6 @@ async function startCall() {
   });
 
   pc.ontrack = (e) => {
-    console.log("REMOTE STREAM");
     document.getElementById("remote").srcObject = e.streams[0];
   };
 
@@ -109,7 +121,6 @@ async function startCall() {
 
   const isCaller = users[0] === userId;
 
-  // ICE SEND
   pc.onicecandidate = (e) => {
     if (e.candidate) {
       if (isCaller) {
@@ -120,37 +131,33 @@ async function startCall() {
     }
   };
 
-  // ICE RECEIVE
   if (isCaller) {
-    calleeCandidates.on("child_added", async (snap) => {
+    calleeCandidates.on("child_added", async snap => {
       await pc.addIceCandidate(new RTCIceCandidate(JSON.parse(snap.val())));
     });
   } else {
-    callerCandidates.on("child_added", async (snap) => {
+    callerCandidates.on("child_added", async snap => {
       await pc.addIceCandidate(new RTCIceCandidate(JSON.parse(snap.val())));
     });
   }
 
-  // OFFER / ANSWER
   if (isCaller) {
     const offer = await pc.createOffer();
     await pc.setLocalDescription(offer);
 
     await callRef.child("offer").set(JSON.stringify(offer));
 
-    callRef.child("answer").on("value", async (snap) => {
+    callRef.child("answer").on("value", async snap => {
       if (snap.exists()) {
         await pc.setRemoteDescription(JSON.parse(snap.val()));
       }
     });
 
   } else {
-    callRef.child("offer").on("value", async (snap) => {
+    callRef.child("offer").on("value", async snap => {
       if (!snap.exists()) return;
 
-      const offer = JSON.parse(snap.val());
-
-      await pc.setRemoteDescription(offer);
+      await pc.setRemoteDescription(JSON.parse(snap.val()));
 
       const answer = await pc.createAnswer();
       await pc.setLocalDescription(answer);
@@ -160,23 +167,25 @@ async function startCall() {
   }
 
   pc.onconnectionstatechange = () => {
-    console.log("STATE:", pc.connectionState);
-
     if (pc.connectionState === "connected") {
       setStatus("Connected 🎉");
     }
   };
 
-  // 🔥 DISCONNECT FIX
-  db.ref("rooms/" + roomId + "/users").on("value", snap => {
+  // 🔥 IMPORTANT: ANY USER LEFT → DELETE ROOM
+  db.ref("rooms/" + roomId + "/users").on("value", async (snap) => {
     const users = snap.val();
 
     if (!users || Object.keys(users).length < 2) {
+      await db.ref("rooms/" + roomId).remove();
+      await db.ref("calls/" + roomId).remove();
+
       disconnect();
       setStatus("Searching...");
     }
   });
 }
+
 
 // 🔁 NEXT
 async function next() {
@@ -184,19 +193,16 @@ async function next() {
 
   await db.ref("rooms/" + roomId + "/users/" + userId).remove();
 
+  await db.ref("rooms/" + roomId).remove();
+  await db.ref("calls/" + roomId).remove();
+
   disconnect();
-
-  const snap = await db.ref("rooms/" + roomId + "/users").once("value");
-
-  if (!snap.exists()) {
-    await db.ref("rooms/" + roomId).remove();
-    await db.ref("calls/" + roomId).remove();
-  }
 
   roomId = null;
 
   find();
 }
+
 
 // 🔥 DISCONNECT
 function disconnect() {
@@ -204,21 +210,17 @@ function disconnect() {
     pc.close();
     pc = null;
   }
-
   document.getElementById("remote").srcObject = null;
 }
+
 
 // 🔥 REFRESH CLEAN
 window.onbeforeunload = async () => {
   if (roomId) {
-    await db.ref("rooms/" + roomId + "/users/" + userId).remove();
-
-    const snap = await db.ref("rooms/" + roomId + "/users").once("value");
-
-    if (!snap.exists()) {
-      await db.ref("rooms/" + roomId).remove();
-      await db.ref("calls/" + roomId).remove();
-    }
+    await db.ref("rooms/" + roomId).remove();
+    await db.ref("calls/" + roomId).remove();
   }
 };
+
+
 
