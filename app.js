@@ -1,10 +1,15 @@
 // 🔥 Firebase config (APNA DALO)
 const firebaseConfig = {
-  apiKey: "YOUR_KEY",
-  authDomain: "YOUR_DOMAIN",
-  databaseURL: "YOUR_DB_URL",
-  projectId: "YOUR_ID"
+  apiKey: "AIzaSy...",
+  authDomain: "apppoe-702a4.firebaseapp.com",
+  databaseURL: "https://apppoe-702a4-default-rtdb.firebaseio.com", // 👈 ADD THIS
+  projectId: "apppoe-702a4",
+  storageBucket: "apppoe-702a4.firebasestorage.app",
+  messagingSenderId: "685763814033",
+  appId: "1:685763814033:web:f573e17b8125ba1bad5530",
+  measurementId: "G-9G8M5W4WZ8"
 };
+
 
 firebase.initializeApp(firebaseConfig);
 const db = firebase.database();
