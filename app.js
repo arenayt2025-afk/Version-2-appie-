@@ -9,8 +9,13 @@ const firebaseConfig = {
   appId: "1:685763814033:web:f573e17b8125ba1bad5530",
   measurementId: "G-9G8M5W4WZ8"
 };
-
-
+// 🔥 Firebase config
+const firebaseConfig = {
+  apiKey: "YOUR_KEY",
+  authDomain: "YOUR_DOMAIN",
+  databaseURL: "YOUR_DB_URL",
+  projectId: "YOUR_ID"
+};
 
 firebase.initializeApp(firebaseConfig);
 const db = firebase.database();
